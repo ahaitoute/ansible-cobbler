@@ -295,6 +295,7 @@
     --clobber
     --name={{ item.name | quote }}
     --hostname={{ item.hostname | quote }}
+    {% if item.name_servers_search is defined %}--name-servers-search={{ item.name_servers_search | quote }}{% endif %}
     --profile={{ item.profile | quote }}
     --ip-address={{ item.ip | quote }}
     --gateway={{ item.gateway | quote }}

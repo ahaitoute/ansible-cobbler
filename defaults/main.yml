@@ -93,6 +93,7 @@ skipping_signature_update: false
 #   - {
 #       name: cobbler-node1,
 #       hostname: cobbler-node1.local,
+#       name_servers_search: example.com,
 #       profile: ubuntu-14.04-mini-x86_64,
 #       interface: eth0,
 #       ip: 192.168.10.100,
