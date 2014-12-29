@@ -195,6 +195,24 @@
     - wait for cobbler
     - sync cobbler
 
+# -----------------------------------
+# Cobbler Kickstart and Snippet files
+# -----------------------------------
+
+- name: add kickstart files to cobbler
+  copy: src={{ item.name }}
+        dest=/var/lib/cobbler/kickstarts/
+        owner=root group=root mode=0644
+  with_items: kickstarts
+  when: kickstarts is defined
+
+- name: add snippet files to cobbler
+  copy: src={{ item.name }}
+        dest=/var/lib/cobbler/snippets/
+        owner=root group=root mode=0644
+  with_items: snippets
+  when: snippets is defined
+
 # ---------------------
 # Cobbler Distributions
 # ---------------------
