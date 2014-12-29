@@ -151,7 +151,7 @@
   notify: restart xinetd
 
 - name: start and enable xinetd
-  service: name=xinetd state=started enabled=true
+  service: name=xinetd enabled=true
 
 - name: configure cobbler
   template: src=settings.j2 dest=/etc/cobbler/settings
