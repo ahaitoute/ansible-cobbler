@@ -7,123 +7,16 @@
 # -------------
 
 - name: unsupported package manager
-  fail: msg='this playbook requries yum or apt only'
-  when: ansible_pkg_mgr != 'yum' and ansible_pkg_mgr != 'apt'
+  fail: msg='this playbook requries RedHat or Debian based system'
+  when: ansible_os_family|lower != 'redhat' and ansible_os_family|lower != 'debian'
 
-# ---------------
-# Package Sources
-# ---------------
+- name: Include OS specific tasks
+  include: '{{ ansible_os_family | lower }}.yml'
 
-# yum
-- name: check epel repo (yum)
-  stat: path=/etc/yum.repos.d/epel.repo
-  register: epel_file
+- name: Include OS required variables
+  include_vars: '{{ ansible_os_family | lower }}.yml'
 
-- name: configure epel repo (yum)
-  template: src=epel.repo.j2
-        dest=/etc/yum.repos.d/epel.repo
-        owner=root group=root mode=0644
-  when: ansible_pkg_mgr == 'yum' and not epel_file.stat.exists
-
-# ------------
-# Dependencies
-# ------------
-
-# yum
-- name: install dependencies (yum)
-  yum: name={{ item }} state=present
-  with_items:
-    - xinetd
-    - dhcp
-    - syslinux
-  when: ansible_pkg_mgr == 'yum'
-
-# apt
-- name: install dependencies (apt)
-  apt: name={{ item }} state=present update_cache=true
-  with_items:
-    - xinetd
-    - isc-dhcp-server
-    - debmirror
-  when: ansible_pkg_mgr == 'apt'
-
-# -------
-# selinux
-# -------
-- name: set selinux to permissive (yum)
-  selinux: policy=targeted state=permissive
-  when: ansible_pkg_mgr == 'yum'
-
-# -----
-# dhcpd
-# -----
-- name: configure dhcpd (yum)
-  template: src=dhcpd.j2 dest=/etc/sysconfig/dhcpd
-  when: ansible_pkg_mgr == 'yum'
-
-- name: enable dhcpd (yum)
-  service: name=dhcpd state=stopped enabled=true
-  when: ansible_pkg_mgr == 'yum'
-
-# ---------------
-# isc-dhcp-server
-# ---------------
-- name: configure isc-dhcp-server (apt)
-  template: src=isc-dhcp-server.j2 dest=/etc/default/isc-dhcp-server
-  when: ansible_pkg_mgr == 'apt'
-
-- name: enable isc-dhcp-server (apt)
-  service: name=isc-dhcp-server state=stopped enabled=true
-  when: ansible_pkg_mgr == 'apt'
-
-# ---------
-# firewalld
-# ---------
-- name: check if firewalld is installed
-  sudo: yes
-  command: which firewalld
-  register: firewalld
-  changed_when: false
-  ignore_errors: true
-
-- name: check if firewalld service is running
-  sudo: yes
-  command: firewall-cmd --state
-  register: firewalld_svc
-  ignore_errors: true
-  when: firewalld|success
-
-- name: enable cobbler tftpd through firewalld
-  sudo: yes
-  firewalld: service=tftp permanent=true state=enabled
-  notify: restart firewalld
-  when: firewalld|success and firewalld_svc.stdout=='running'
-
-- name: enable cobbler httpd through firewalld
-  sudo: yes
-  firewalld: service=http permanent=true state=enabled
-  notify: restart firewalld
-  when: firewalld|success and firewalld_svc.stdout=='running'
-
-# ---
-# ufw
-# ---
-- name: check if ufw is installed
-  sudo: yes
-  command: which ufw
-  register: ufw
-  changed_when: false
-  ignore_errors: true
-
-- name: allow tftp through ufw
-  sudo: yes
-  ufw: rule=allow port=69 proto=tcp
-  when: ufw|success
-
-- name: allow http through ufw
-  sudo: yes
-  ufw: rule=allow port=80 proto=tcp
-  when: ufw|success
+- include: firewall.yml
 
 # -------
 # Cobbler
@@ -133,25 +26,45 @@
   when: ansible_pkg_mgr == 'yum'
 
 - name: install cobbler (apt)
-  apt: name=cobbler state=present
+  apt: name=cobbler={{ cobbler_version }} state=present
   when: ansible_pkg_mgr == 'apt'
 
-- name: start and enable apache2 (apt)
-  service: name=apache2 state=started enabled=true
-  when: ansible_pkg_mgr == 'apt'
+- name: enable required apache modules
+  apache2_module: state=present name={{ item }}
+  with_items:
+    - proxy
+    - proxy_http
+    - status
+  when: apache_service_name == 'apache2'
 
-- name: start and enable httpd (yum)
-  service: name=httpd state=started enabled=true
-  when: ansible_pkg_mgr == 'yum'
+- name: copy cobbler config files
+  copy: src=cobbler.conf
+        dest=/etc/apache2/conf-enabled/cobbler.conf
+        mode=0644
+  when: apache_service_name == 'apache2'
+
+- name: copy cobbler_web config files
+  copy: src=cobbler_web.conf
+        dest=/etc/apache2/conf-enabled/cobbler_web.conf
+        mode=0644
+  notify:
+    - restart apache
+  when: apache_service_name == 'apache2'
 
 - name: configure xinetd rsync
   copy: src=rsync
         dest=/etc/xinetd.d/
         owner=root group=root mode=0644
-  notify: restart xinetd
+  notify:
+    - restart xinetd
 
 - name: start and enable xinetd
-  service: name=xinetd enabled=true
+  service: name={{ item }} state=started enabled=true
+  with_items:
+    - xinetd
+    - "{{ apache_service_name }}"
+
+- meta: flush_handlers
 
 - name: configure cobbler
   template: src=settings.j2 dest=/etc/cobbler/settings
@@ -160,20 +73,17 @@
     - wait for cobbler
     - sync cobbler
 
-- name: start and enable cobbler (apt)
-  service: name=cobbler state=started enabled=true
-  when: ansible_pkg_mgr == 'apt'
+- name: start and enable cobbler
+  service: name={{ daemon }} state=started enabled=true
 
-- name: start and enable cobblerd (yum)
-  service: name=cobblerd state=started enabled=true
-  when: ansible_pkg_mgr == 'yum'
+- name: wait for cobbler
+  wait_for: host=127.0.0.1 port=25151 delay=5 timeout=30 state=started
 
 - name: get cobbler loaders
   command: cobbler get-loaders
   args:
     creates: /var/lib/cobbler/loaders/README
-  ignore_errors: yes
-  when: not skipping_signature_update
+  when: cobbler_get_loaders
   notify:
     - restart cobbler
     - wait for cobbler
@@ -181,8 +91,7 @@
 
 - name: update cobbler signatures
   command: cobbler signature update
-  ignore_errors: yes
-  when: not skipping_signature_update
+  when: cobbler_signature_update
   notify:
     - restart cobbler
     - wait for cobbler
@@ -214,15 +123,34 @@
   when: snippets is defined
 
 # ---------------------
+# Cobbler Kickstarts
+# ---------------------
+
+- name: adding defualt ubuntu preseed
+  template: src=ubuntu-server.preseed.j2 dest=/etc/cobbler/ubuntu-server.preseed
+
+- name: copy user defined kickstart files
+  copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0644') }}"
+  with_items: "{{ kickstarts }}"
+  notify:
+    - restart cobbler
+
+# ---------------------
 # Cobbler Distributions
 # ---------------------
 
 # Attempt to un-mount any previous disto mount points, can occur if previous run failed
 - name: umount isos
-  shell: umount {{ item.path | quote }}
-  with_items: distros
-  when: distros is defined
   ignore_errors: yes
+  shell: umount {{ item.path | quote }}
+  with_items:
+    - "{{ distros }}"
+  when: distros is defined
 
 - name: create iso directory to hold distro images
   file: path=~/iso state=directory
@@ -230,39 +158,51 @@
 # Download each defined distro ISO if it doesn't already exist
 - name: download distro iso files
   get_url: url={{ item.url }} dest={{ item.file }}
-  with_items: distros
+  with_items:
+    - "{{ distros }}"
   when: distros is defined
 
 # Add the each distro/profile pair only if the distro doesn't already exist
+- name: check distro exists in cobbler
+  shell: "cobbler distro report --name={{ item.name | quote }}-{{ item.arch | quote }} > /dev/null"
+  ignore_errors: yes
+  changed_when: no
+  register: distro_result
+  when: distros is defined
+  with_items:
+    - "{{ distros }}"
+
+- debug: msg="Distro watch {{ distro_result }}"
+
 - name: add distro/profile pairs to cobbler
   shell: >
-    cobbler distro report --name="{{ item.name }}-{{ item.arch }}"
-    || (mkdir -p {{ item.path | quote }}
+    (mkdir -p {{ item.path | quote }}
     && mount -t iso9660 -o loop,ro {{ item.file | quote }} {{ item.path | quote }}
     && cobbler import --path={{ item.path | quote }} --name={{ item.name | quote }} --arch={{ item.arch | quote }} {% if item.kickstart is defined %}--kickstart={{ item.kickstart | quote }}{% endif %}
     && umount {{ item.path | quote }})
-  with_items: distros
-  when: distros is defined
+  with_items:
+    - "{{ distros }}"
+  when: distros is defined and distro_result|failed
   notify:
     - restart cobbler
     - wait for cobbler
     - sync cobbler
 
-- name: check distro exists in cobbler
-  with_items: distro_imports
-  command: cobbler distro report --name="{{ item.name }}-{{ item.arch }}"
-  register: distro_result
-  ignore_errors: true
-  when: distro_imports is defined
+#- name: check distro for import exists in cobbler
+#  with_items: distro_imports
+#  command: cobbler distro report --name="{{ item.name }}"
+#  register: distro_imports_result
+#  ignore_errors: true
+#  when: distro_imports is defined
 
-- name: import distro to cobbler
-  shell: cobbler import --name="{{ item.name }}-{{ item.arch }}" --path="{{ item.url }}" --arch="{{ item.arch }}"
-  with_items: distro_imports
-  when: distro_imports is defined and distro_result|failed
-  notify:
-    - restart cobbler
-    - wait for cobbler
-    - sync cobbler
+#- name: import distro to cobbler
+#  shell: cobbler import --name="{{ item.name }}-{{ item.arch }}" --path="{{ item.url }}" --arch="{{ item.arch }}"
+#  with_items: distro_imports
+#  when: distro_imports is defined and distro_imports_result|failed
+#  notify:
+#    - restart cobbler
+#    - wait for cobbler
+#    - sync cobbler
 
 # ---------------
 # Cobbler Repos
@@ -276,8 +216,9 @@
     --mirror={{ item.mirror | quote }}
     {% if item.arch is defined %}--arch={{ item.arch | quote }}{% endif %}
     {% if item.mirror_locally is defined %}--mirror-locally={{ item.mirror_locally | quote }}{% endif %}
-  with_items: repos
   when: repos is defined
+  with_items:
+    - "{{ repos }}"
   notify:
     - restart cobbler
     - wait for cobbler
@@ -295,9 +236,12 @@
     --distro={{ item.distro | quote }}
     {% if item.kickstart is defined %}--kickstart={{ item.kickstart | quote }}{% endif %}
     {% if item.ksmeta is defined %}--ksmeta={{ item.ksmeta | quote }}{% endif %}
+    {% if item.kopts is defined %}--kopts={{ item.kopts | quote }}{% endif %}
+    {% if item.kopts_post is defined %}--kopts-post={{ item.kopts_post | quote }}{% endif %}
     {% if item.repos is defined %}--repos={{ item.repos | quote }}{% endif %}
-  with_items: profiles
   when: profiles is defined
+  with_items:
+    - "{{ profiles }}"
   notify:
     - restart cobbler
     - wait for cobbler
@@ -306,6 +250,8 @@
 # ---------------
 # Cobbler Systems
 # ---------------
+
+- debug: var=systems
 
 - name: add systems to cobbler
   shell: >
@@ -316,15 +262,22 @@
     {% if item.name_servers_search is defined %}--name-servers-search={{ item.name_servers_search | quote }}{% endif %}
     --profile={{ item.profile | quote }}
     --ip-address={{ item.ip | quote }}
+    --subnet={{ item.netmask | quote }}
     --gateway={{ item.gateway | quote }}
     --mac={{ item.mac | quote }}
     --interface={{ item.interface | quote }}
-    --netboot-enabled=true
-    {% if item.static is defined %}--static={{ item.static | quote }}{% endif %}
+    {% if item.netboot is defined %}--netboot-enabled={{ item.netboot | quote }}{% endif %}
+    {% if item.dns_name is defined %}--dns_name={{ item.dns_name | quote }}{% endif %}
+    {% if item.static is defined %}--static={{ item.static }}{% endif %}
+    {% if item.kopts is defined %}--kopts={{ item.kopts | quote }}{% endif %}
+    {% if item.kopts_post is defined %}--kopts-post={{ item.kopts_post | quote }}{% endif %}
+    {% if item.ksmeta is defined %}--ksmeta={{ item.ksmeta | quote }}{% endif %}
     {% if item.dhcptag is defined %}--dhcp-tag={{ item.dhcptag | quote }}{% endif %}
-    {% if item.next_server is defined %}--server {{ item.next_server | quote }}{% endif %}
-  with_items: systems
+    {% if item.next_server is defined %}--server={{ item.next_server | quote }}{% endif %}
+    {% if item.mgmt_classes is defined %}--mgmt-classes={{ item.mgmt_classes }}{% endif %}
   when: systems is defined
+  with_items:
+    - "{{ systems }}"
   notify:
     - restart cobbler
     - wait for cobbler
